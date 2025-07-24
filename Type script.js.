@@ -26,7 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
         name: "PBKDF2",
         hash: "SHA-256",
         saltLength: 16, // 16 bytes for salt
-        iterations: 100000 // 100,000+ iterations - High iterations for strength!
+        iterations: 310000 // Increased iterations for more hellish difficulty / better security!
     };
     const IV_LENGTH = 12; // 96-bit IV
     const AUTH_TAG_LENGTH = 128; // 128-bit authentication tag
@@ -54,13 +54,18 @@ document.addEventListener('DOMContentLoaded', () => {
      * @returns {ArrayBuffer} The decoded ArrayBuffer.
      */
     const base64ToArrayBuffer = (base64) => {
-        const binaryString = atob(base64);
-        const len = binaryString.length;
-        const bytes = new Uint8Array(len);
-        for (let i = 0; i < len; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
+        try {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        } catch (e) {
+            console.error("Base64 decoding failed:", e);
+            throw new Error("Invalid Base64 string provided.");
         }
-        return bytes.buffer;
     };
 
     /**
@@ -69,20 +74,20 @@ document.addEventListener('DOMContentLoaded', () => {
      * @param {boolean} isError True if the message is an error, false otherwise.
      */
     const announce = (message, isError = false) => {
-        liveRegion.textContent = ''; // Clear previous message
-        // Add a temporary class to ensure CSS transition for visibility (if any)
-        liveRegion.classList.remove('success', 'error');
+        liveRegion.textContent = ''; // Clear previous message immediately
+        // Remove existing status classes
+        liveRegion.classList.remove('success-message', 'error-message');
         if (isError) {
-            liveRegion.classList.add('error');
+            liveRegion.classList.add('error-message');
         } else {
-            liveRegion.classList.add('success');
+            liveRegion.classList.add('success-message');
         }
         liveRegion.textContent = message;
-        // Visually hide it again after a short delay to allow screen reader to pick up
+        // Keep message visible/audible for 5 seconds for screen readers
         setTimeout(() => {
             liveRegion.textContent = '';
-            liveRegion.classList.remove('success', 'error');
-        }, 5000); // Keep message for 5 seconds for screen readers
+            liveRegion.classList.remove('success-message', 'error-message');
+        }, 5000);
     };
 
     // --- Key Derivation ---
@@ -161,7 +166,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return arrayBufferToBase64(combined.buffer);
         } catch (error) {
             console.error("Encryption failed:", error);
-            announce(`Encryption failed: ${error.message}`, true);
+            announce(`Encryption failed: ${error.message}. Ensure your browser supports Web Crypto API.`, true);
             throw error;
         }
     };
@@ -179,8 +184,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const encryptedBuffer = base64ToArrayBuffer(encryptedBase64);
 
             // Ensure the encrypted data is long enough to contain salt, IV, and at least some tag/ciphertext
+            // Salt (16) + IV (12) + Auth Tag (16 bytes = 128 bits) = 44 bytes minimum
             if (encryptedBuffer.byteLength < PBKDF2_ALGO.saltLength + IV_LENGTH + (AUTH_TAG_LENGTH / 8)) {
-                throw new Error("Encrypted data is too short or malformed.");
+                throw new Error("Encrypted data is too short or malformed. Not a valid encrypted blob.");
             }
 
             const salt = new Uint8Array(encryptedBuffer.slice(0, PBKDF2_ALGO.saltLength));
@@ -203,14 +209,15 @@ document.addEventListener('DOMContentLoaded', () => {
             return decryptedBuffer; // Return ArrayBuffer for flexibility (text or binary)
         } catch (error) {
             console.error("Decryption failed:", error);
-            // Specific error messages for common crypto failures
             let userMessage = `Decryption failed: ${error.message}.`;
             if (error.name === "OperationError" && error.message.includes("tag mismatch")) {
-                userMessage = "Decryption failed: Incorrect password or corrupted data. Authentication tag mismatch.";
+                userMessage = "Decryption failed: Incorrect password or corrupted data. Authentication tag mismatch. Ensure your password is exactly correct.";
             } else if (error.name === "DataError") {
-                userMessage = "Decryption failed: Data is corrupted or not a valid encrypted blob.";
-            } else if (error.name === "InvalidAccessError" && error.message.includes("Algorithm: not usable")) {
-                userMessage = "Security error: Browser environment might not support Web Crypto API as expected. Try a different browser.";
+                userMessage = "Decryption failed: Data is corrupted or not a valid encrypted blob. It might not be Base64 encoded correctly.";
+            } else if (error.name === "InvalidAccessError") { // Covers cases where key usage is wrong or algorithm issues
+                userMessage = "Security error: Problem with cryptographic operations. Ensure your browser supports Web Crypto API.";
+            } else if (error instanceof Error && error.message.includes("Invalid Base64 string")) {
+                userMessage = "Decryption failed: The provided encrypted data is not a valid Base64 string.";
             }
             announce(userMessage + " Please check your password and the encrypted data.", true);
             throw error;
@@ -233,14 +240,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 buttonElement.setAttribute('aria-label', `Hide ${inputElement.id.includes('encrypt') ? 'encryption' : 'decryption'} password`);
             }
             isPasswordVisible = !isPasswordVisible;
-            inputElement.focus(); // Keep focus on the input for accessibility
+            inputElement.focus(); // Keep focus on the input for accessibility after toggling
         });
     };
 
     setupPasswordToggle(encryptPasswordInput, toggleEncryptPasswordButton);
     setupPasswordToggle(decryptPasswordInput, toggleDecryptPasswordButton);
 
-    // Encrypt Button Click
+    // Main encryption trigger
     encryptButton.addEventListener('click', async () => {
         const password = encryptPasswordInput.value;
         if (!password) {
@@ -248,44 +255,44 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        if (plaintextInput.value) {
-            // Text encryption
-            try {
-                const encrypted = await encryptData(plaintextInput.value, password);
-                encryptedOutput.value = encrypted;
-                plaintextInput.value = ''; // Clear plaintext after encryption
-                fileEncryptInput.value = ''; // Clear file input
-                encryptedOutput.focus(); // Focus on output for easy copying
-            } catch (error) {
-                // Error already announced by encryptData
-            }
-        } else if (fileEncryptInput.files.length > 0) {
-            // File encryption
-            const file = fileEncryptInput.files[0];
-            const reader = new FileReader();
+        let dataToEncrypt = null;
+        let isFile = false;
 
-            reader.onload = async (e) => {
-                try {
-                    const fileBuffer = e.target.result; // ArrayBuffer
-                    const encrypted = await encryptData(fileBuffer, password);
-                    encryptedOutput.value = encrypted;
-                    plaintextInput.value = ''; // Clear text input
-                    fileEncryptInput.value = ''; // Clear file input
-                    encryptedOutput.focus();
-                } catch (error) {
-                    // Error already announced by encryptData
-                }
-            };
-            reader.onerror = () => {
-                announce("Failed to read file for encryption.", true);
-            };
-            reader.readAsArrayBuffer(file);
+        if (plaintextInput.value) {
+            dataToEncrypt = plaintextInput.value;
+            isFile = false;
+        } else if (fileEncryptInput.files.length > 0) {
+            const file = fileEncryptInput.files[0];
+            isFile = true;
+            // Use FileReader to get ArrayBuffer from file
+            dataToEncrypt = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = (e) => reject(new Error("Failed to read file for encryption."));
+                reader.readAsArrayBuffer(file);
+            }).catch(e => {
+                announce(e.message, true);
+                throw e; // Re-throw to stop further processing
+            });
         } else {
             announce("Please enter text or select a file to encrypt.", true);
+            return;
+        }
+
+        if (dataToEncrypt === null) return; // If file reading failed or no input
+
+        try {
+            const encryptedResult = await encryptData(dataToEncrypt, password);
+            encryptedOutput.value = encryptedResult;
+            plaintextInput.value = ''; // Clear plaintext after encryption
+            fileEncryptInput.value = ''; // Clear file input
+            encryptedOutput.focus(); // Focus on output for easy copying
+        } catch (error) {
+            // Error already announced by encryptData
         }
     });
 
-    // Decrypt Button Click
+    // Main decryption trigger
     decryptButton.addEventListener('click', async () => {
         const password = decryptPasswordInput.value;
         if (!password) {
@@ -293,35 +300,36 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        let encryptedDataSource = '';
+        let encryptedSourceData = null;
+        let originalFileName = 'decrypted_file';
+        let originalFileType = 'application/octet-stream';
+
         if (encryptedInput.value) {
-            encryptedDataSource = encryptedInput.value;
+            encryptedSourceData = encryptedInput.value;
         } else if (fileDecryptInput.files.length > 0) {
             const file = fileDecryptInput.files[0];
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                try {
-                    const encryptedFileContent = arrayBufferToBase64(e.target.result);
-                    await processDecryptionResult(await decryptData(encryptedFileContent, password), file.name, file.type);
-                    encryptedInput.value = ''; // Clear encrypted input
-                    fileDecryptInput.value = ''; // Clear file input
-                } catch (error) {
-                    // Error already announced by decryptData
-                }
-            };
-            reader.onerror = () => {
-                announce("Failed to read encrypted file for decryption.", true);
-            };
-            reader.readAsArrayBuffer(file);
-            return; // Exit here as decryption happens in reader.onload
+            originalFileName = file.name;
+            originalFileType = file.type || originalFileType;
+
+            encryptedSourceData = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(arrayBufferToBase64(e.target.result)); // File content as base64 string
+                reader.onerror = (e) => reject(new Error("Failed to read encrypted file for decryption."));
+                reader.readAsArrayBuffer(file);
+            }).catch(e => {
+                announce(e.message, true);
+                throw e; // Re-throw to stop further processing
+            });
         } else {
             announce("Please paste encrypted data or select an encrypted file to decrypt.", true);
             return;
         }
 
-        // For text input decryption
+        if (encryptedSourceData === null) return; // If file reading failed or no input
+
         try {
-            await processDecryptionResult(await decryptData(encryptedDataSource, password));
+            const decryptedBuffer = await decryptData(encryptedSourceData, password);
+            processDecryptionResult(decryptedBuffer, originalFileName, originalFileType);
             encryptedInput.value = ''; // Clear encrypted input
             fileDecryptInput.value = ''; // Clear file input
         } catch (error) {
@@ -348,7 +356,7 @@ document.addEventListener('DOMContentLoaded', () => {
             announce("Decrypted data is binary or not valid UTF-8 text. Click 'Download Decrypted File' to save.", false);
             decryptedOutput.value = `[Binary Data] - Click "Download Decrypted File" to save.`;
             downloadDecryptedButton.style.display = 'inline-block'; // Show download button
-            // Set the dynamic download action for binary data
+            // Set up a *new* click listener to avoid conflicts, or make sure the main one handles this
             downloadDecryptedButton.onclick = () => downloadBlob(decryptedBuffer, `decrypted_${originalFileName}`, originalFileType);
             decryptedOutput.focus();
         }
@@ -363,7 +371,7 @@ document.addEventListener('DOMContentLoaded', () => {
             announce("Encrypted data copied to clipboard!", false);
         } catch (err) {
             console.error('Failed to copy text: ', err);
-            announce("Failed to copy encrypted data to clipboard. Please try manually.", true);
+            announce("Failed to copy encrypted data to clipboard. Please try manually selecting and copying.", true);
         }
     });
 
@@ -374,7 +382,7 @@ document.addEventListener('DOMContentLoaded', () => {
             announce("Decrypted data copied to clipboard!", false);
         } catch (err) {
             console.error('Failed to copy text: ', err);
-            announce("Failed to copy decrypted data to clipboard. Please try manually.", true);
+            announce("Failed to copy decrypted data to clipboard. Please try manually selecting and copying.", true);
         }
     });
 
@@ -385,30 +393,34 @@ document.addEventListener('DOMContentLoaded', () => {
         const a = document.createElement('a');
         a.href = url;
         a.download = filename;
+        // Append to body, click, and remove to trigger download
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        URL.revokeObjectURL(url); // Clean up the URL object
         announce(`File "${filename}" downloaded.`, false);
     };
 
     downloadEncryptedButton.addEventListener('click', () => {
         if (encryptedOutput.value) {
+            // Encode the Base64 string back to an ArrayBuffer of its UTF-8 representation
+            // This ensures consistent file type regardless of content
             downloadBlob(new TextEncoder().encode(encryptedOutput.value), 'encrypted_data.txt', 'text/plain');
         } else {
             announce("No encrypted data to download.", true);
         }
     });
 
-    // Handle default behavior for downloadDecryptedButton if it's text
-    // The onclick is dynamically set for binary data in processDecryptionResult
+    // The downloadDecryptedButton's onclick is now set entirely within processDecryptionResult
+    // so this general listener will only handle cases where processDecryptionResult didn't hide/override it
+    // and where it's explicitly text data.
     downloadDecryptedButton.addEventListener('click', (event) => {
+        // Only proceed if it's currently text data in the output and no special binary handler is set
         if (decryptedOutput.value && !decryptedOutput.value.includes('[Binary Data]')) {
-            downloadBlob(new TextEncoder().encode(decryptedOutput.value), 'decrypted_text.txt', 'text/plain');
-        } else if (decryptedOutput.value.includes('[Binary Data]') && typeof downloadDecryptedButton.onclick === 'function' && event.currentTarget.onclick === downloadDecryptedButton.onclick) {
-            // If it's binary and the onclick was dynamically set, let that handler run.
-            // This prevents the default text download from overriding the binary download set by processDecryptionResult.
-            // No need to do anything here, the specific handler will fire.
+             downloadBlob(new TextEncoder().encode(decryptedOutput.value), 'decrypted_text.txt', 'text/plain');
+        } else if (decryptedOutput.value.includes('[Binary Data]') && typeof event.currentTarget.onclick === 'function') {
+            // If it's binary, and a specific onclick was set, let that fire instead of this general one.
+            // No action needed here as the direct onclick from processDecryptionResult will be triggered.
         } else {
             announce("No decrypted data to download.", true);
         }
