@@ -1,0 +1,446 @@
+document.addEventListener('DOMContentLoaded', () => {
+    // --- UI Elements ---
+    const encryptPasswordInput = document.getElementById('encrypt-password');
+    const toggleEncryptPasswordButton = document.getElementById('toggle-encrypt-password');
+    const plaintextInput = document.getElementById('plaintext-input');
+    const fileEncryptInput = document.getElementById('file-encrypt-input');
+    const encryptButton = document.getElementById('encrypt-button');
+    const encryptedOutput = document.getElementById('encrypted-output');
+    const copyEncryptedButton = document.getElementById('copy-encrypted-button');
+    const downloadEncryptedButton = document.getElementById('download-encrypted-button');
+
+    const decryptPasswordInput = document.getElementById('decrypt-password');
+    const toggleDecryptPasswordButton = document.getElementById('toggle-decrypt-password');
+    const encryptedInput = document.getElementById('encrypted-input');
+    const fileDecryptInput = document.getElementById('file-decrypt-input');
+    const decryptButton = document.getElementById('decrypt-button');
+    const decryptedOutput = document.getElementById('decrypted-output');
+    const copyDecryptedButton = document.getElementById('copy-decrypted-button');
+    const downloadDecryptedButton = document.getElementById('download-decrypted-button');
+
+    const liveRegion = document.getElementById('live-region');
+
+    // --- Constants ---
+    const KEY_ALGO = { name: "AES-GCM", length: 256 };
+    const PBKDF2_ALGO = {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        saltLength: 16, // 16 bytes for salt
+        iterations: 100000 // 100,000+ iterations - High iterations for strength!
+    };
+    const IV_LENGTH = 12; // 96-bit IV
+    const AUTH_TAG_LENGTH = 128; // 128-bit authentication tag
+
+    // --- Utility Functions ---
+
+    /**
+     * Converts an ArrayBuffer to a Base64 string.
+     * @param {ArrayBuffer} buffer The ArrayBuffer to convert.
+     * @returns {string} The Base64 encoded string.
+     */
+    const arrayBufferToBase64 = (buffer) => {
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    };
+
+    /**
+     * Converts a Base64 string to an ArrayBuffer.
+     * @param {string} base64 The Base64 string to convert.
+     * @returns {ArrayBuffer} The decoded ArrayBuffer.
+     */
+    const base64ToArrayBuffer = (base64) => {
+        const binaryString = atob(base64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes.buffer;
+    };
+
+    /**
+     * Displays a message in the live region for screen readers.
+     * @param {string} message The message to announce.
+     * @param {boolean} isError True if the message is an error, false otherwise.
+     */
+    const announce = (message, isError = false) => {
+        liveRegion.textContent = ''; // Clear previous message
+        // Add a temporary class to ensure CSS transition for visibility (if any)
+        liveRegion.classList.remove('success', 'error');
+        if (isError) {
+            liveRegion.classList.add('error');
+        } else {
+            liveRegion.classList.add('success');
+        }
+        liveRegion.textContent = message;
+        // Visually hide it again after a short delay to allow screen reader to pick up
+        setTimeout(() => {
+            liveRegion.textContent = '';
+            liveRegion.classList.remove('success', 'error');
+        }, 5000); // Keep message for 5 seconds for screen readers
+    };
+
+    // --- Key Derivation ---
+
+    /**
+     * Derives an AES-GCM key from a password using PBKDF2.
+     * @param {string} password The user's password.
+     * @param {Uint8Array} salt The salt to use for key derivation.
+     * @returns {Promise<CryptoKey>} The derived AES-GCM key.
+     */
+    const deriveKey = async (password, salt) => {
+        const passwordBuffer = new TextEncoder().encode(password);
+        const baseKey = await window.crypto.subtle.importKey(
+            "raw",
+            passwordBuffer,
+            { name: PBKDF2_ALGO.name },
+            false,
+            ["deriveKey"]
+        );
+
+        return window.crypto.subtle.deriveKey(
+            {
+                name: PBKDF2_ALGO.name,
+                salt: salt,
+                iterations: PBKDF2_ALGO.iterations,
+                hash: PBKDF2_ALGO.hash
+            },
+            baseKey,
+            KEY_ALGO,
+            false, // not extractable - crucial for security!
+            ["encrypt", "decrypt"]
+        );
+    };
+
+    // --- Encryption Logic ---
+
+    /**
+     * Encrypts data using AES-GCM.
+     * @param {string | ArrayBuffer} data The data to encrypt (string or ArrayBuffer).
+     * @param {string} password The encryption password.
+     * @returns {Promise<string>} The Base64 encoded encrypted blob (salt || iv || ciphertext || authTag).
+     */
+    const encryptData = async (data, password) => {
+        try {
+            const salt = window.crypto.getRandomValues(new Uint8Array(PBKDF2_ALGO.saltLength));
+            const key = await deriveKey(password, salt);
+
+            const iv = window.crypto.getRandomValues(new Uint8Array(IV_LENGTH)); // 96-bit IV, unique per encryption
+
+            let dataBuffer;
+            if (typeof data === 'string') {
+                dataBuffer = new TextEncoder().encode(data);
+            } else if (data instanceof ArrayBuffer) {
+                dataBuffer = data;
+            } else {
+                throw new Error("Invalid data type for encryption. Must be string or ArrayBuffer.");
+            }
+
+            const encryptedBuffer = await window.crypto.subtle.encrypt(
+                {
+                    name: KEY_ALGO.name,
+                    iv: iv,
+                    tagLength: AUTH_TAG_LENGTH // 128-bit authentication tag
+                },
+                key,
+                dataBuffer
+            );
+
+            // Concatenate salt, IV, and the encrypted data (ciphertext + tag).
+            const combined = new Uint8Array(salt.length + iv.length + encryptedBuffer.byteLength);
+            combined.set(salt, 0);
+            combined.set(iv, salt.length);
+            combined.set(new Uint8Array(encryptedBuffer), salt.length + iv.length);
+
+            announce("Data encrypted successfully!", false);
+            return arrayBufferToBase64(combined.buffer);
+        } catch (error) {
+            console.error("Encryption failed:", error);
+            announce(`Encryption failed: ${error.message}`, true);
+            throw error;
+        }
+    };
+
+    // --- Decryption Logic ---
+
+    /**
+     * Decrypts data using AES-GCM.
+     * @param {string} encryptedBase64 The Base64 encoded encrypted blob.
+     * @param {string} password The decryption password.
+     * @returns {Promise<string | ArrayBuffer>} The decrypted data (string or ArrayBuffer).
+     */
+    const decryptData = async (encryptedBase64, password) => {
+        try {
+            const encryptedBuffer = base64ToArrayBuffer(encryptedBase64);
+
+            // Ensure the encrypted data is long enough to contain salt, IV, and at least some tag/ciphertext
+            if (encryptedBuffer.byteLength < PBKDF2_ALGO.saltLength + IV_LENGTH + (AUTH_TAG_LENGTH / 8)) {
+                throw new Error("Encrypted data is too short or malformed.");
+            }
+
+            const salt = new Uint8Array(encryptedBuffer.slice(0, PBKDF2_ALGO.saltLength));
+            const iv = new Uint8Array(encryptedBuffer.slice(PBKDF2_ALGO.saltLength, PBKDF2_ALGO.saltLength + IV_LENGTH));
+            const ciphertextAndTag = encryptedBuffer.slice(PBKDF2_ALGO.saltLength + IV_LENGTH);
+
+            const key = await deriveKey(password, salt);
+
+            const decryptedBuffer = await window.crypto.subtle.decrypt(
+                {
+                    name: KEY_ALGO.name,
+                    iv: iv,
+                    tagLength: AUTH_TAG_LENGTH
+                },
+                key,
+                ciphertextAndTag
+            );
+
+            announce("Data decrypted successfully!", false);
+            return decryptedBuffer; // Return ArrayBuffer for flexibility (text or binary)
+        } catch (error) {
+            console.error("Decryption failed:", error);
+            // Specific error messages for common crypto failures
+            let userMessage = `Decryption failed: ${error.message}.`;
+            if (error.name === "OperationError" && error.message.includes("tag mismatch")) {
+                userMessage = "Decryption failed: Incorrect password or corrupted data. Authentication tag mismatch.";
+            } else if (error.name === "DataError") {
+                userMessage = "Decryption failed: Data is corrupted or not a valid encrypted blob.";
+            } else if (error.name === "InvalidAccessError" && error.message.includes("Algorithm: not usable")) {
+                userMessage = "Security error: Browser environment might not support Web Crypto API as expected. Try a different browser.";
+            }
+            announce(userMessage + " Please check your password and the encrypted data.", true);
+            throw error;
+        }
+    };
+
+    // --- Event Listeners and UI Interactions ---
+
+    // Toggle password visibility
+    const setupPasswordToggle = (inputElement, buttonElement) => {
+        let isPasswordVisible = false;
+        buttonElement.addEventListener('click', () => {
+            if (isPasswordVisible) {
+                inputElement.type = 'password';
+                buttonElement.textContent = 'Show';
+                buttonElement.setAttribute('aria-label', `Show ${inputElement.id.includes('encrypt') ? 'encryption' : 'decryption'} password`);
+            } else {
+                inputElement.type = 'text';
+                buttonElement.textContent = 'Hide';
+                buttonElement.setAttribute('aria-label', `Hide ${inputElement.id.includes('encrypt') ? 'encryption' : 'decryption'} password`);
+            }
+            isPasswordVisible = !isPasswordVisible;
+            inputElement.focus(); // Keep focus on the input for accessibility
+        });
+    };
+
+    setupPasswordToggle(encryptPasswordInput, toggleEncryptPasswordButton);
+    setupPasswordToggle(decryptPasswordInput, toggleDecryptPasswordButton);
+
+    // Encrypt Button Click
+    encryptButton.addEventListener('click', async () => {
+        const password = encryptPasswordInput.value;
+        if (!password) {
+            announce("Please enter a password for encryption.", true);
+            return;
+        }
+
+        if (plaintextInput.value) {
+            // Text encryption
+            try {
+                const encrypted = await encryptData(plaintextInput.value, password);
+                encryptedOutput.value = encrypted;
+                plaintextInput.value = ''; // Clear plaintext after encryption
+                fileEncryptInput.value = ''; // Clear file input
+                encryptedOutput.focus(); // Focus on output for easy copying
+            } catch (error) {
+                // Error already announced by encryptData
+            }
+        } else if (fileEncryptInput.files.length > 0) {
+            // File encryption
+            const file = fileEncryptInput.files[0];
+            const reader = new FileReader();
+
+            reader.onload = async (e) => {
+                try {
+                    const fileBuffer = e.target.result; // ArrayBuffer
+                    const encrypted = await encryptData(fileBuffer, password);
+                    encryptedOutput.value = encrypted;
+                    plaintextInput.value = ''; // Clear text input
+                    fileEncryptInput.value = ''; // Clear file input
+                    encryptedOutput.focus();
+                } catch (error) {
+                    // Error already announced by encryptData
+                }
+            };
+            reader.onerror = () => {
+                announce("Failed to read file for encryption.", true);
+            };
+            reader.readAsArrayBuffer(file);
+        } else {
+            announce("Please enter text or select a file to encrypt.", true);
+        }
+    });
+
+    // Decrypt Button Click
+    decryptButton.addEventListener('click', async () => {
+        const password = decryptPasswordInput.value;
+        if (!password) {
+            announce("Please enter a password for decryption.", true);
+            return;
+        }
+
+        let encryptedDataSource = '';
+        if (encryptedInput.value) {
+            encryptedDataSource = encryptedInput.value;
+        } else if (fileDecryptInput.files.length > 0) {
+            const file = fileDecryptInput.files[0];
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const encryptedFileContent = arrayBufferToBase64(e.target.result);
+                    await processDecryptionResult(await decryptData(encryptedFileContent, password), file.name, file.type);
+                    encryptedInput.value = ''; // Clear encrypted input
+                    fileDecryptInput.value = ''; // Clear file input
+                } catch (error) {
+                    // Error already announced by decryptData
+                }
+            };
+            reader.onerror = () => {
+                announce("Failed to read encrypted file for decryption.", true);
+            };
+            reader.readAsArrayBuffer(file);
+            return; // Exit here as decryption happens in reader.onload
+        } else {
+            announce("Please paste encrypted data or select an encrypted file to decrypt.", true);
+            return;
+        }
+
+        // For text input decryption
+        try {
+            await processDecryptionResult(await decryptData(encryptedDataSource, password));
+            encryptedInput.value = ''; // Clear encrypted input
+            fileDecryptInput.value = ''; // Clear file input
+        } catch (error) {
+            // Error already announced by decryptData
+        }
+    });
+
+    /**
+     * Processes the decrypted ArrayBuffer, attempting to decode as text, otherwise preparing for binary download.
+     * @param {ArrayBuffer} decryptedBuffer The decrypted data as an ArrayBuffer.
+     * @param {string} originalFileName Optional: The name of the original encrypted file.
+     * @param {string} originalFileType Optional: The MIME type of the original encrypted file.
+     */
+    const processDecryptionResult = async (decryptedBuffer, originalFileName = 'decrypted_file', originalFileType = 'application/octet-stream') => {
+        try {
+            // Attempt to decode as text (UTF-8)
+            const decodedText = new TextDecoder('utf-8', { fatal: true }).decode(decryptedBuffer);
+            decryptedOutput.value = decodedText;
+            downloadDecryptedButton.style.display = 'none'; // Hide download button if it's text
+            announce("Decrypted successfully as text!", false);
+            decryptedOutput.focus();
+        } catch (textError) {
+            // If TextDecoder fails, it's likely binary or non-UTF8 text
+            announce("Decrypted data is binary or not valid UTF-8 text. Click 'Download Decrypted File' to save.", false);
+            decryptedOutput.value = `[Binary Data] - Click "Download Decrypted File" to save.`;
+            downloadDecryptedButton.style.display = 'inline-block'; // Show download button
+            // Set the dynamic download action for binary data
+            downloadDecryptedButton.onclick = () => downloadBlob(decryptedBuffer, `decrypted_${originalFileName}`, originalFileType);
+            decryptedOutput.focus();
+        }
+    };
+
+
+    // Copy to Clipboard functions
+    copyEncryptedButton.addEventListener('click', () => {
+        encryptedOutput.select();
+        try {
+            document.execCommand('copy');
+            announce("Encrypted data copied to clipboard!", false);
+        } catch (err) {
+            console.error('Failed to copy text: ', err);
+            announce("Failed to copy encrypted data to clipboard. Please try manually.", true);
+        }
+    });
+
+    copyDecryptedButton.addEventListener('click', () => {
+        decryptedOutput.select();
+        try {
+            document.execCommand('copy');
+            announce("Decrypted data copied to clipboard!", false);
+        } catch (err) {
+            console.error('Failed to copy text: ', err);
+            announce("Failed to copy decrypted data to clipboard. Please try manually.", true);
+        }
+    });
+
+    // Download functions
+    const downloadBlob = (dataBlob, filename, mimeType) => {
+        const blob = new Blob([dataBlob], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        announce(`File "${filename}" downloaded.`, false);
+    };
+
+    downloadEncryptedButton.addEventListener('click', () => {
+        if (encryptedOutput.value) {
+            downloadBlob(new TextEncoder().encode(encryptedOutput.value), 'encrypted_data.txt', 'text/plain');
+        } else {
+            announce("No encrypted data to download.", true);
+        }
+    });
+
+    // Handle default behavior for downloadDecryptedButton if it's text
+    // The onclick is dynamically set for binary data in processDecryptionResult
+    downloadDecryptedButton.addEventListener('click', (event) => {
+        if (decryptedOutput.value && !decryptedOutput.value.includes('[Binary Data]')) {
+            downloadBlob(new TextEncoder().encode(decryptedOutput.value), 'decrypted_text.txt', 'text/plain');
+        } else if (decryptedOutput.value.includes('[Binary Data]') && typeof downloadDecryptedButton.onclick === 'function' && event.currentTarget.onclick === downloadDecryptedButton.onclick) {
+            // If it's binary and the onclick was dynamically set, let that handler run.
+            // This prevents the default text download from overriding the binary download set by processDecryptionResult.
+            // No need to do anything here, the specific handler will fire.
+        } else {
+            announce("No decrypted data to download.", true);
+        }
+    });
+
+
+    // Ensure only one input (text or file) is used for encryption/decryption at a time
+    plaintextInput.addEventListener('input', () => {
+        if (plaintextInput.value) {
+            fileEncryptInput.value = ''; // Clear file input if text is entered
+        }
+    });
+
+    fileEncryptInput.addEventListener('change', () => {
+        if (fileEncryptInput.files.length > 0) {
+            plaintextInput.value = ''; // Clear text input if file is selected
+        }
+    });
+
+    encryptedInput.addEventListener('input', () => {
+        if (encryptedInput.value) {
+            fileDecryptInput.value = ''; // Clear file input if text is entered
+        }
+    });
+
+    fileDecryptInput.addEventListener('change', () => {
+        if (fileDecryptInput.files.length > 0) {
+            encryptedInput.value = ''; // Clear text input if file is selected
+        }
+    });
+
+    // Initial state of download button for decrypted data (hidden by default)
+    downloadDecryptedButton.style.display = 'none';
+
+});
